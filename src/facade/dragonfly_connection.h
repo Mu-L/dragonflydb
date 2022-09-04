@@ -108,7 +108,10 @@ class Connection : public util::Connection {
   char name_[16];
   char phase_[16];
 
-  std::unique_ptr<ConnectionContext> cc_;
+  // shared_ptr - because of PollEvent callback that may be called for some reason
+  // even after HandleRequests exits and resets cc_.
+  // We use ref-counting observation to avoid data-race.
+  std::shared_ptr<ConnectionContext> cc_;
 
   struct Request;
 

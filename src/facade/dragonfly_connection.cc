@@ -228,8 +228,17 @@ void Connection::HandleRequests() {
       if (breaker_cb_) {
         should_disarm_poller = true;
 
-        poll_id = us->PollEvent(POLLERR | POLLHUP, [&](int32_t mask) {
-          cc_->conn_closing = true;
+        // If this callback is called after we exit the scope, it might access
+        // invalid stack frame. In order to avoid this we observe cc_ lifecycle
+        // and exit immediately, if it was destroyed.
+        // The reason for all this ambiguity is that CancelPoll seems not to work 100%
+        // and sometimes it still runs the callback even after it removed the poll.
+        auto cb = [&, weak_cc = weak_ptr<ConnectionContext>(cc_)](int32_t mask) {
+          shared_ptr cc_ptr = weak_cc.lock();
+          if (!cc_ptr)
+            return;
+
+          cc_ptr->conn_closing = true;
           if (mask > 0) {
             VLOG(1) << "Got event " << mask;
             breaker_cb_(mask);
@@ -237,7 +246,9 @@ void Connection::HandleRequests() {
 
           evc_.notify();  // Notify dispatch fiber.
           should_disarm_poller = false;
-        });
+        };
+
+        poll_id = us->PollEvent(POLLERR | POLLHUP, move(cb));
       }
 
       ConnectionFlow(peer);
@@ -256,8 +267,7 @@ void Connection::RegisterOnBreak(BreakerCb breaker_cb) {
   breaker_cb_ = breaker_cb;
 }
 
-void Connection::SendMsgVecAsync(const PubMessage& pub_msg,
-                                 fibers_ext::BlockingCounter bc) {
+void Connection::SendMsgVecAsync(const PubMessage& pub_msg, fibers_ext::BlockingCounter bc) {
   DCHECK(cc_);
 
   if (cc_->conn_closing) {
